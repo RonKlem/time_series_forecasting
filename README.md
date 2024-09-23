@@ -17,21 +17,21 @@ One of the main datasets used in this project is customer billing data. To ensur
 Installation
 To get started, clone the repository and install the required dependencies:
 
-git clone https://github.com/RonKlem/time_series_forecasting.git
-cd time_series_forecasting
-pip install -r requirements.txt
+1. git clone https://github.com/RonKlem/time_series_forecasting.git
+2. cd time_series_forecasting
+3. pip install -r requirements.txt
 
 Usage
 
 Data Wrangling: Run the data wrangling script to clean and prepare the data.
-python customer_billing_data_wrangling.ipynb
+- python customer_billing_data_wrangling.ipynb
 
 Model Training: Train the forecasting models using the prepared data.
-python Forecasting_POC.ipynb
+- python Forecasting_POC.ipynb
 
 (not available yet)
 Evaluation: Evaluate the performance of the models and visualize the results.
-python evaluate.py
+- python evaluate.py
 
 (not available yet)
 Results
