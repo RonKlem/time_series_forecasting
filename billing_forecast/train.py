@@ -2,7 +2,7 @@ import os
 import numpy as np
 import pandas as pd
 from data_generator import generate_synthetic_data
-from src.data_prep import preprocess, time_train_test_split
+from data_prep import preprocess, time_train_test_split, fit_and_save_scaler, transform_df_with_scaler, load_scaler, inverse_transform_array
 from src.models import BaselineModels, train_lightgbm, predict_lightgbm, train_xgboost, predict_xgboost, rmse, mape
 from src.models import tune_ridge, tune_random_forest, tune_lightgbm_sklearn, tune_xgboost_sklearn
 
@@ -65,37 +65,67 @@ def main():
     # 3) Split by time: hold out the last N months for testing
     train_df, test_df = time_train_test_split(df_proc, test_months=6)
 
+    # Define feature sets: which columns are used as features (exclude IDs/labels)
     feature_cols = [c for c in df_proc.columns if c not in ['billing_month', 'customer_id', 'volume', 'revenue', 'product_area', 'unique_product_code']]
-    X_train = train_df[feature_cols]
+    # Categorical columns that should NOT be scaled (they are encoded integers)
+    cat_cols = ['customer_id_enc', 'product_area_enc', 'product_code_enc']
+    numeric_cols = [c for c in feature_cols if c not in cat_cols]
+
+    # 3.1) Fit scalers on the training data and save them for reuse
+    scaler_dir = os.path.join('models', 'scalers')
+    os.makedirs(scaler_dir, exist_ok=True)
+    feature_scaler_path = os.path.join(scaler_dir, 'feature_scaler.joblib')
+    target_scaler_path = os.path.join(scaler_dir, 'target_scaler.joblib')
+
+    # Fit feature scaler on numeric columns and target scaler on volume
+    fit_and_save_scaler(train_df, numeric_cols, feature_scaler_path)
+    # Fit target scaler; expects the column name 'volume'
+    fit_and_save_scaler(train_df, ['volume'], target_scaler_path)
+
+    # 3.2) Transform the full processed dataframe (so indices remain aligned)
+    df_proc_scaled = transform_df_with_scaler(df_proc, feature_scaler_path)
+
+    # Prepare train/test feature matrices from the scaled dataframe
+    X_train = df_proc_scaled.loc[train_df.index, feature_cols].reset_index(drop=True)
+    X_test = df_proc_scaled.loc[test_df.index, feature_cols].reset_index(drop=True)
     y_train = train_df['volume'].values
-    X_test = test_df[feature_cols]
     y_test = test_df['volume'].values
+
+    # Scale targets for model training
+    target_scaler = load_scaler(target_scaler_path)['scaler']
+    y_train_scaled = target_scaler.transform(y_train.reshape(-1, 1)).ravel()
+    y_test_scaled = target_scaler.transform(y_test.reshape(-1, 1)).ravel()
 
     # 4) Baseline models with hyperparameter tuning
     print('Tuning and training baseline models')
     # Tune Ridge (a regularized linear model)
     print(' - Tuning Ridge (time-aware grid search)')
     try:
-        best_ridge, best_ridge_params = tune_ridge(X_train, y_train)
+        best_ridge, best_ridge_params = tune_ridge(X_train, y_train_scaled)
         preds_ridge = best_ridge.predict(X_test)
+        # preds_ridge are in scaled target space; inverse-transform them
+        preds_ridge = inverse_transform_array(preds_ridge, target_scaler_path, feature_name='volume')
     except Exception as e:
         # If tuning fails, fall back to a default model
         print('Ridge tuning failed, falling back to default Ridge:', e)
-        baselines = BaselineModels()
-        baselines.lr.fit(X_train, y_train)
-        preds_ridge = baselines.lr.predict(X_test)
+    baselines = BaselineModels()
+    baselines.lr.fit(X_train, y_train_scaled)
+    preds_ridge = baselines.lr.predict(X_test)
+    preds_ridge = inverse_transform_array(preds_ridge, target_scaler_path, feature_name='volume')
         best_ridge_params = {}
 
     # Tune RandomForest with randomized search
     print(' - Tuning RandomForest (time-aware randomized search)')
     try:
-        best_rf, best_rf_params = tune_random_forest(X_train, y_train)
+        best_rf, best_rf_params = tune_random_forest(X_train, y_train_scaled)
         preds_rf = best_rf.predict(X_test)
+        preds_rf = inverse_transform_array(preds_rf, target_scaler_path, feature_name='volume')
     except Exception as e:
         print('RandomForest tuning failed, falling back to default:', e)
         baselines = BaselineModels()
-        baselines.rf.fit(X_train, y_train)
+        baselines.rf.fit(X_train, y_train_scaled)
         preds_rf = baselines.rf.predict(X_test)
+        preds_rf = inverse_transform_array(preds_rf, target_scaler_path, feature_name='volume')
         best_rf_params = {}
 
     # Collect baseline results
@@ -110,9 +140,10 @@ def main():
     # 5) Advanced models: LightGBM and XGBoost (only if installed)
     print('Tuning and training LightGBM (if installed)')
     try:
-        best_lgbm, best_lgbm_params = tune_lightgbm_sklearn(X_train, y_train)
+        best_lgbm, best_lgbm_params = tune_lightgbm_sklearn(X_train, y_train_scaled)
         if best_lgbm is not None:
             p = best_lgbm.predict(X_test)
+            p = inverse_transform_array(p, target_scaler_path, feature_name='volume')
             results['lightgbm'] = {'rmse': rmse(y_test, p), 'mape': mape(y_test, p)}
             predictions_by_model['lightgbm'] = p
             best_params_summary['lightgbm'] = best_lgbm_params
@@ -121,9 +152,10 @@ def main():
 
     print('Tuning and training XGBoost (if installed)')
     try:
-        best_xgb, best_xgb_params = tune_xgboost_sklearn(X_train, y_train)
+        best_xgb, best_xgb_params = tune_xgboost_sklearn(X_train, y_train_scaled)
         if best_xgb is not None:
             p = best_xgb.predict(X_test)
+            p = inverse_transform_array(p, target_scaler_path, feature_name='volume')
             results['xgboost'] = {'rmse': rmse(y_test, p), 'mape': mape(y_test, p)}
             predictions_by_model['xgboost'] = p
             best_params_summary['xgboost'] = best_xgb_params
@@ -134,10 +166,9 @@ def main():
     print('Training PyTorch LSTM (if torch installed)')
     # Prepare input matrix for the PyTorch model: numeric features followed
     # by three encoded categorical columns (customer, product area, product code)
-    cat_cols = ['customer_id_enc', 'product_area_enc', 'product_code_enc']
-    numeric_cols = [c for c in feature_cols if c not in cat_cols]
-    X_all = df_proc[numeric_cols + cat_cols].values
-    y_all = df_proc['volume'].values
+    # Use the scaled dataframe for numeric fields so PyTorch sees standardized inputs
+    X_all = df_proc_scaled[numeric_cols + cat_cols].values
+    y_all = target_scaler.transform(df_proc['volume'].values.reshape(-1, 1)).ravel()
 
     train_idx = train_df.index
     test_idx = test_df.index
@@ -183,8 +214,10 @@ def main():
                     p = model(numeric, cust_idx, pa_idx, pc_idx).cpu().numpy()
                     preds_torch_list.append(p)
             preds_torch = np.concatenate(preds_torch_list)
-            results['pytorch_lstm'] = {'rmse': rmse(y_test_torch, preds_torch), 'mape': mape(y_test_torch, preds_torch)}
-            predictions_by_model['pytorch_lstm'] = preds_torch
+                # preds_torch are in scaled target space; inverse-transform for metrics
+                preds_torch_inv = inverse_transform_array(preds_torch, target_scaler_path, feature_name='volume')
+                results['pytorch_lstm'] = {'rmse': rmse(y_test_torch, preds_torch_inv), 'mape': mape(y_test_torch, preds_torch_inv)}
+                predictions_by_model['pytorch_lstm'] = preds_torch_inv
 
             # Optional: run a short Optuna search to show best hyperparameters
             try:
